@@ -1,9 +1,15 @@
 {
+  "format_version": 1,
   "id": "wwhd-online",
   "name": "WWHD Online",
   "version": "0.2.0",
+  "game_id": "wwhd",
+  "kind": "native",
+  "abi_version": 1,
+  "binaries": {
+    "windows-x86_64": "wwhd_online.dll"
+  },
+  "author": "wwhd-online contributors",
   "description": "True online multiplayer for The Legend of Zelda: The Wind Waker HD",
-  "native-mod": "wwhd_online.dll",
-  "mod-hooks": false,
-  "options": {}
+  "minimum_manager_version": "1.5.0"
 }
