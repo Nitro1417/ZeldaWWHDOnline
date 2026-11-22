@@ -26,7 +26,8 @@ namespace net {
 
 static constexpr int MAX_PEERS = 8;
 
-static ENetHost*  s_host        = nullptr;
+/* NOTE: "s_host" is a macro in winsock.h; use s_enet_host to avoid conflict. */
+static ENetHost*  s_enet_host   = nullptr;
 static bool       s_is_host     = false;
 static bool       s_is_relay    = false;
 static bool       s_is_p2p      = false;
@@ -75,18 +76,18 @@ static int slot_for_peer(ENetPeer* peer) {
 /* ── Public API ── */
 
 bool host_start(uint16_t port, uint8_t max_peers) {
-    if (s_host) return false;
+    if (s_enet_host) return false;
     if (enet_initialize() != 0) return false;
 
     ENetAddress addr;
     addr.host = ENET_HOST_ANY;
     addr.port = port;
 
-    s_host = enet_host_create(&addr,
+    s_enet_host = enet_host_create(&addr,
                               (max_peers < MAX_PEERS ? max_peers : MAX_PEERS),
                               (size_t)Channel::Count,
                               /*inBandwidth=*/0, /*outBandwidth=*/0);
-    if (!s_host) {
+    if (!s_enet_host) {
         enet_deinitialize();
         return false;
     }
@@ -99,32 +100,32 @@ bool host_start(uint16_t port, uint8_t max_peers) {
 }
 
 bool client_connect(const char* host_addr, uint16_t port) {
-    if (s_host) return false;
+    if (s_enet_host) return false;
     if (enet_initialize() != 0) return false;
 
-    s_host = enet_host_create(/*address=*/nullptr,
+    s_enet_host = enet_host_create(/*address=*/nullptr,
                               /*maxPeers=*/1,
                               (size_t)Channel::Count,
                               0, 0);
-    if (!s_host) {
+    if (!s_enet_host) {
         enet_deinitialize();
         return false;
     }
 
     ENetAddress addr;
     if (enet_address_set_host(&addr, host_addr) < 0) {
-        enet_host_destroy(s_host);
-        s_host = nullptr;
+        enet_host_destroy(s_enet_host);
+        s_enet_host = nullptr;
         enet_deinitialize();
         return false;
     }
     addr.port = port;
 
-    ENetPeer* peer = enet_host_connect(s_host, &addr,
+    ENetPeer* peer = enet_host_connect(s_enet_host, &addr,
                                        (size_t)Channel::Count, /*data=*/0);
     if (!peer) {
-        enet_host_destroy(s_host);
-        s_host = nullptr;
+        enet_host_destroy(s_enet_host);
+        s_enet_host = nullptr;
         enet_deinitialize();
         return false;
     }
@@ -144,23 +145,23 @@ bool client_connect(const char* host_addr, uint16_t port) {
 /* ── Relay helpers ── */
 
 static bool relay_connect_common(const char* relay_addr, uint16_t relay_port) {
-    if (s_host) return false;
+    if (s_enet_host) return false;
     if (enet_initialize() != 0) return false;
 
     /* Relay uses a single ENet channel; we route by message type tag. */
-    s_host = enet_host_create(nullptr, /*maxPeers=*/1, /*channels=*/1, 0, 0);
-    if (!s_host) { enet_deinitialize(); return false; }
+    s_enet_host = enet_host_create(nullptr, /*maxPeers=*/1, /*channels=*/1, 0, 0);
+    if (!s_enet_host) { enet_deinitialize(); return false; }
 
     ENetAddress addr;
     if (enet_address_set_host(&addr, relay_addr) < 0) {
-        enet_host_destroy(s_host); s_host = nullptr;
+        enet_host_destroy(s_enet_host); s_enet_host = nullptr;
         enet_deinitialize(); return false;
     }
     addr.port = relay_port;
 
-    ENetPeer* peer = enet_host_connect(s_host, &addr, /*channels=*/1, 0);
+    ENetPeer* peer = enet_host_connect(s_enet_host, &addr, /*channels=*/1, 0);
     if (!peer) {
-        enet_host_destroy(s_host); s_host = nullptr;
+        enet_host_destroy(s_enet_host); s_enet_host = nullptr;
         enet_deinitialize(); return false;
     }
 
@@ -177,13 +178,13 @@ bool relay_create(const char* relay_addr, uint16_t relay_port) {
 
     /* Flush the CONNECT event and send RELAY_CREATE immediately. */
     ENetEvent ev;
-    if (enet_host_service(s_host, &ev, /*timeout_ms=*/2000) > 0 &&
+    if (enet_host_service(s_enet_host, &ev, /*timeout_ms=*/2000) > 0 &&
         ev.type == ENET_EVENT_TYPE_CONNECT)
     {
         uint8_t msg = RELAY_CREATE;
         ENetPacket* pkt = enet_packet_create(&msg, 1, ENET_PACKET_FLAG_RELIABLE);
         enet_peer_send(s_peers[0], 0, pkt);
-        enet_host_flush(s_host);
+        enet_host_flush(s_enet_host);
     } else {
         /* Relay unreachable. */
         shutdown();
@@ -198,7 +199,7 @@ bool relay_create(const char* relay_addr, uint16_t relay_port) {
 /* ── P2P helpers ─────────────────────────────────────────────────────────── */
 
 bool p2p_create(const char* signaling_url, uint16_t local_port) {
-    if (s_host) return false;
+    if (s_enet_host) return false;
 
     P2PCreateResult r = ::p2p_create(signaling_url, local_port);
     if (!r.ok) return false;
@@ -225,7 +226,7 @@ bool p2p_create(const char* signaling_url, uint16_t local_port) {
 }
 
 bool p2p_join(const char* signaling_url, const char* code6, uint16_t local_port) {
-    if (s_host) return false;
+    if (s_enet_host) return false;
 
     P2PJoinResult r = ::p2p_join(signaling_url, code6, local_port);
     if (!r.ok) return false;
@@ -248,7 +249,7 @@ bool relay_join(const char* relay_addr, uint16_t relay_port, const char* code6) 
     if (!relay_connect_common(relay_addr, relay_port)) return false;
 
     ENetEvent ev;
-    if (enet_host_service(s_host, &ev, /*timeout_ms=*/2000) > 0 &&
+    if (enet_host_service(s_enet_host, &ev, /*timeout_ms=*/2000) > 0 &&
         ev.type == ENET_EVENT_TYPE_CONNECT)
     {
         uint8_t buf[1 + RELAY_CODE_LEN];
@@ -257,7 +258,7 @@ bool relay_join(const char* relay_addr, uint16_t relay_port, const char* code6) 
         ENetPacket* pkt = enet_packet_create(buf, sizeof buf,
                                              ENET_PACKET_FLAG_RELIABLE);
         enet_peer_send(s_peers[0], 0, pkt);
-        enet_host_flush(s_host);
+        enet_host_flush(s_enet_host);
     } else {
         shutdown();
         return false;
@@ -269,7 +270,7 @@ bool relay_join(const char* relay_addr, uint16_t relay_port, const char* code6) 
 }
 
 void shutdown() {
-    if (!s_host) return;
+    if (!s_enet_host) return;
 
     /* Clean up P2P room from signaling server if we were the host. */
     if (s_is_p2p && s_is_host && s_lobby_code[0])
@@ -283,8 +284,8 @@ void shutdown() {
         }
     }
 
-    enet_host_destroy(s_host);
-    s_host = nullptr;
+    enet_host_destroy(s_enet_host);
+    s_enet_host = nullptr;
     enet_deinitialize();
 
     s_connected        = false;
@@ -326,10 +327,10 @@ void set_session_secret(const char* hex64) {
 }
 
 void poll() {
-    if (!s_host) return;
+    if (!s_enet_host) return;
 
     ENetEvent ev;
-    while (enet_host_service(s_host, &ev, /*timeout_ms=*/0) > 0) {
+    while (enet_host_service(s_enet_host, &ev, /*timeout_ms=*/0) > 0) {
         switch (ev.type) {
 
         case ENET_EVENT_TYPE_CONNECT: {
@@ -361,7 +362,7 @@ void poll() {
                     ENetPacket* pkt = enet_packet_create(&auth, sizeof auth,
                                                          ENET_PACKET_FLAG_RELIABLE);
                     enet_peer_send(ev.peer, (uint8_t)Channel::System, pkt);
-                    enet_host_flush(s_host);
+                    enet_host_flush(s_enet_host);
                 }
                 s_connected = true;
                 if (s_on_connect) s_on_connect(NET_HOST_ID);
@@ -458,7 +459,7 @@ void poll() {
                     } else {
                         fprintf(stderr, "[net] peer %u auth FAILED — disconnecting\n",
                                 peer_id);
-                        enet_host_flush(s_host);
+                        enet_host_flush(s_enet_host);
                         enet_peer_disconnect(ev.peer, 0);
                     }
                     enet_packet_destroy(ev.packet);
@@ -518,7 +519,7 @@ void poll() {
 }
 
 void send_unreliable(uint8_t peer_id, Channel ch, const void* data, size_t len) {
-    if (!s_host || !data || !len) return;
+    if (!s_enet_host || !data || !len) return;
 
     if (s_is_relay) {
         /* In relay mode all traffic goes to the relay peer; it fans out. */
@@ -533,7 +534,7 @@ void send_unreliable(uint8_t peer_id, Channel ch, const void* data, size_t len) 
     if (!pkt) return;
 
     if (peer_id == NET_BROADCAST) {
-        enet_host_broadcast(s_host, (enet_uint8)ch, pkt);
+        enet_host_broadcast(s_enet_host, (enet_uint8)ch, pkt);
     } else {
         for (int i = 0; i < MAX_PEERS; i++) {
             if (s_peers[i] && s_peer_ids[i] == peer_id) {
@@ -546,7 +547,7 @@ void send_unreliable(uint8_t peer_id, Channel ch, const void* data, size_t len) 
 }
 
 void send_reliable(uint8_t peer_id, Channel ch, const void* data, size_t len) {
-    if (!s_host || !data || !len) return;
+    if (!s_enet_host || !data || !len) return;
 
     if (s_is_relay) {
         if (!s_peers[0]) return;
@@ -560,7 +561,7 @@ void send_reliable(uint8_t peer_id, Channel ch, const void* data, size_t len) {
     if (!pkt) return;
 
     if (peer_id == NET_BROADCAST) {
-        enet_host_broadcast(s_host, (enet_uint8)ch, pkt);
+        enet_host_broadcast(s_enet_host, (enet_uint8)ch, pkt);
     } else {
         for (int i = 0; i < MAX_PEERS; i++) {
             if (s_peers[i] && s_peer_ids[i] == peer_id) {

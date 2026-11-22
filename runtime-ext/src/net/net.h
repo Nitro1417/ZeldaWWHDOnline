@@ -97,5 +97,6 @@ bool        is_connected();
 uint8_t     local_player_id(); /* NET_HOST_ID for host, 1–N for clients    */
 uint8_t     peer_count();      /* number of remote peers                   */
 const char* lobby_code();      /* 6-char room code (relay host only)       */
+void        set_local_player_id(uint8_t id); /* called by session.cpp after MSG_HELLO */
 
 } // namespace net

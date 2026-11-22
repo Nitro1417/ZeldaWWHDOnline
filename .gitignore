@@ -21,3 +21,11 @@ desktop.ini
 # Editor
 .vscode/
 *.swp
+
+# Build outputs
+wwhd_online.dll
+wwhd_online.lib
+wwhd_online.exp
+enet/
+runtime-ext/src/**/*.obj
+runtime-ext/src/**/*.o

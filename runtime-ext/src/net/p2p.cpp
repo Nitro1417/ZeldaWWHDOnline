@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <string>
 
 /* ── Platform socket layer ─────────────────────────────────────────────────── */
 #ifdef _WIN32
@@ -98,7 +99,7 @@ static std::string winhttp_request(const char* url_utf8, const char* method,
         ? L"Content-Type: application/json\r\n"
         : WINHTTP_NO_ADDITIONAL_HEADERS;
     DWORD   hdrlen = body ? (DWORD)-1 : 0;
-    LPCVOID data   = body ? (LPCVOID)body : WINHTTP_NO_REQUEST_DATA;
+    LPVOID  data   = body ? const_cast<LPVOID>((LPCVOID)body) : WINHTTP_NO_REQUEST_DATA;
     DWORD   datalen= body ? (DWORD)strlen(body) : 0;
 
     if (!WinHttpSendRequest(hReq, hdr, hdrlen, data, datalen, datalen, 0) ||
