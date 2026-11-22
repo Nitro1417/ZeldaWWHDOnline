@@ -1,0 +1,23 @@
+# Build output
+*.elf
+*.o
+*.d
+build/
+
+# Mod SDK build cache
+.cache/
+
+# Game assets (never commit — legal)
+game/
+build/gen/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+*.swp

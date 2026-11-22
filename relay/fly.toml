@@ -1,0 +1,24 @@
+# fly.toml app configuration file generated for wwhd-relay on 2026-11-21T17:02:27-08:00
+#
+# See https://docs.fly.io/reference/configuration for information about how to use this file.
+#
+
+app = 'wwhd-relay'
+primary_region = 'iad'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  RELAY_PORT = '7778'
+
+[[services]]
+  protocol = 'udp'
+  internal_port = 7778
+
+  [[services.ports]]
+    port = 7778
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '256mb'

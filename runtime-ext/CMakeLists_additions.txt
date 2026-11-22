@@ -1,0 +1,46 @@
+# ── WWHD Online: ENet transport layer ──────────────────────────────────────
+# Add these lines to the base project's CMakeLists.txt.
+# Place the include(FetchContent) near the top with other FetchContent calls.
+# Place the target_* lines near the bottom with the wwhd target.
+
+include(FetchContent)
+
+FetchContent_Declare(enet
+    GIT_REPOSITORY https://github.com/lsalzman/enet.git
+    GIT_TAG        v1.3.17
+)
+FetchContent_MakeAvailable(enet)
+
+# Point at this repo checked out alongside ZeldaWWHDRecomp, e.g.:
+#   ZeldaWWHDRecomp/
+#   ZeldaWWHDOnline/       ← this repo
+set(WWHD_ONLINE_DIR "${CMAKE_SOURCE_DIR}/../ZeldaWWHDOnline/runtime-ext"
+    CACHE PATH "Path to ZeldaWWHDOnline/runtime-ext")
+
+target_sources(wwhd PRIVATE
+    "${WWHD_ONLINE_DIR}/src/net/net.cpp"
+    "${WWHD_ONLINE_DIR}/src/net/net_bindings.cpp"
+    "${WWHD_ONLINE_DIR}/src/net/session.cpp"
+    "${WWHD_ONLINE_DIR}/src/net/stun.cpp"
+    "${WWHD_ONLINE_DIR}/src/net/p2p.cpp"
+)
+
+target_include_directories(wwhd PRIVATE
+    "${WWHD_ONLINE_DIR}/src/net"       # for net.h, session.h, packets.h
+    "${WWHD_ONLINE_DIR}/include"       # for wwhd/net.h (guest SDK addition)
+)
+
+target_link_libraries(wwhd PRIVATE enet)
+
+# Windows: ENet needs Ws2_32 and Winmm; p2p.cpp uses WinHTTP for HTTPS signaling
+if(WIN32)
+    target_link_libraries(wwhd PRIVATE ws2_32 winmm winhttp)
+endif()
+# Linux/Mac: p2p.cpp uses libcurl for HTTPS signaling — install with your package manager
+#   Ubuntu/Debian: sudo apt install libcurl4-openssl-dev
+#   macOS:         brew install curl
+if(NOT WIN32)
+    find_package(CURL REQUIRED)
+    target_link_libraries(wwhd PRIVATE CURL::libcurl)
+endif()
+# ───────────────────────────────────────────────────────────────────────────

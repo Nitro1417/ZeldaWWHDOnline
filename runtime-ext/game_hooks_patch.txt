@@ -1,0 +1,71 @@
+--- game_hooks.cpp additions for WWHD Online ---
+
+Add to the top of runtime/src/game_hooks.cpp, after the existing includes:
+
+    #include "net.h"          // from runtime-ext/src/net/
+    #include "session.h"
+    extern "C" void net_bindings_init();
+
+Add to the existing hook_025DF940 function (fpcM_Execute — the main actor loop),
+at the very START of the function body, before any existing code:
+
+    /* WWHD Online: poll network once per logic step. */
+    if (net::is_connected() || net::is_host()) {
+        net::poll();
+        session::tick();
+    }
+
+Add to your game's startup path (wherever other subsystems are initialized,
+e.g. a "state_loaded" callback or the equivalent of main()):
+
+    /* WWHD Online: start session based on command-line args.
+     *
+     * Direct connection (players open ports / are on same LAN):
+     *   --online-host <port>                 start as session host (open port)
+     *   --online-join <addr> <port>          connect as client directly
+     *
+     * Relay connection (no port forwarding, requires a relay server):
+     *   --online-relay-create <relay> <port> create lobby, prints 6-char code
+     *   --online-relay-join   <relay> <port> <code>  join by code
+     *
+     * P2P connection (recommended — free, no server, works for ~90% of users):
+     *   --online-p2p-create <signaling_url>  discover IP via STUN, host lobby
+     *   --online-p2p-join   <signaling_url> <code>   look up host, punch + connect
+     *
+     *   signaling_url is your Cloudflare Worker URL, e.g.:
+     *     https://wwhd-signal.YOUR-SUBDOMAIN.workers.dev
+     */
+    const char* host_port     = /* read from argv */;
+    const char* join_addr     = /* read from argv */;
+    uint16_t    join_port     = /* read from argv */;
+    const char* relay_host    = /* read from argv */;
+    uint16_t    relay_port    = /* read from argv, default 7778 */;
+    const char* relay_code    = /* read from argv, for --online-relay-join */;
+    const char* p2p_signal    = /* read from argv, Cloudflare Worker URL */;
+    const char* p2p_code      = /* read from argv, for --online-p2p-join */;
+
+    if (host_port) {
+        if (net::host_start((uint16_t)atoi(host_port)))
+            net_bindings_init();
+    } else if (join_addr) {
+        if (net::client_connect(join_addr, join_port))
+            net_bindings_init();
+    } else if (relay_host && !relay_code) {
+        /* Create relay lobby — lobby code shown in-game via wwhd_net_lobby_code(). */
+        if (net::relay_create(relay_host, relay_port))
+            net_bindings_init();
+    } else if (relay_host && relay_code) {
+        /* Join relay lobby by 6-char code. */
+        if (net::relay_join(relay_host, relay_port, relay_code))
+            net_bindings_init();
+    } else if (p2p_signal && !p2p_code) {
+        /* P2P host: STUN + signaling Worker, then start ENet. */
+        if (net::p2p_create(p2p_signal))
+            net_bindings_init();
+    } else if (p2p_signal && p2p_code) {
+        /* P2P guest: look up host from signaling Worker, punch + connect. */
+        if (net::p2p_join(p2p_signal, p2p_code))
+            net_bindings_init();
+    }
+
+--- end of patch ---
