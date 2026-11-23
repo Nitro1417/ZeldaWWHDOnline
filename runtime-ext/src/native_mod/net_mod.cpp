@@ -555,9 +555,28 @@ static void do_net_start(const OnlineArgs& a) {
         }
         break;
     case OnlineArgs::Mode::P2PJoin:
+        if (!a.code[0]) {
+            overlay_show("WWHD Online  join mode  [F9]",
+                         "Mode:    Joining (P2P)", "Room code: (not set)",
+                         "Add code=XXXXXX to wwhd_online.ini", "", "");
+            h->log(h->context, "WWHD Online: join mode — set code= in wwhd_online.ini");
+            logf("p2p_join skipped: no code");
+            break;
+        }
         ok = net::p2p_join(a.signal_url, a.code);
         logf("p2p_join -> %d", ok);
-        if (ok) h->log(h->context, "WWHD Online: P2P connected");
+        if (ok) {
+            h->log(h->context, "WWHD Online: P2P connected");
+            char bar[128], l1[80];
+            snprintf(bar, sizeof bar, "WWHD Online  joined room: %s  [F9]", a.code);
+            snprintf(l1, 80, "Room code:  %s", a.code);
+            overlay_show(bar, "Mode:    Joining (P2P)", l1, "Status:  Connected", "", "");
+        } else {
+            char bar[128], l1[80];
+            snprintf(bar, sizeof bar, "WWHD Online  join FAILED  [F9]");
+            snprintf(l1, 80, "Room code:  %s", a.code);
+            overlay_show(bar, "Mode:    Joining (P2P)", l1, "Status:  Connection failed", "", "");
+        }
         break;
     case OnlineArgs::Mode::RelayCreate:
         ok = net::relay_create(a.addr, a.port);
@@ -570,8 +589,10 @@ static void do_net_start(const OnlineArgs& a) {
         if (ok) h->log(h->context, "WWHD Online: relay connected");
         break;
     case OnlineArgs::Mode::None:
-        h->log(h->context, "WWHD Online: mod loaded (inactive — set mode in F1 → Mods)");
+        h->log(h->context, "WWHD Online: mod loaded (inactive — set mode in F1 -> Mods)");
         logf("mode=disabled");
+        overlay_show("WWHD Online  inactive  — set mode in F1 Mods  [F9]",
+                     "Mode:    None", "", "Select host or join in F1 Mods", "", "");
         break;
     }
     if (a.mode != OnlineArgs::Mode::None && !ok)
@@ -638,6 +659,11 @@ static void on_frame(void* /*instance*/, uint64_t logic_step) {
 
 static void on_config_changed(void* /*instance*/) {
     net::shutdown();
+    /* Clear bar immediately so the old room code doesn't linger while
+       the new mode starts up. */
+    snprintf(g_bar_text, 128, "WWHD Online  switching...");
+    if (g_bar_hwnd && g_wm_update)
+        PostMessageA((HWND)g_bar_hwnd, g_wm_update, 0, 0);
     OnlineArgs a = build_config();
     logf("on_config_changed: mode=%d signal=%s", (int)a.mode, a.signal_url);
     do_net_start(a);
