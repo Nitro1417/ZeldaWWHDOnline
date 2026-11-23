@@ -1,146 +1,165 @@
 # WWHD Online
 
-> True online multiplayer for *The Legend of Zelda: The Wind Waker HD*, built on the [ZeldaWWHDRecomp](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp) native PC port.
+> True online multiplayer for *The Legend of Zelda: The Wind Waker HD*, built as a native mod for the [ZeldaWWHDRecomp](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp) PC port.
 
 ![Status](https://img.shields.io/badge/status-early%20development-f0a830?style=flat-square)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-3dccb0?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-Windows-3dccb0?style=flat-square)
 ![License](https://img.shields.io/badge/license-MPL--2.0-7fafc8?style=flat-square)
 
-**WWHD Online is an unofficial fan project. It is not affiliated with or endorsed by Nintendo.**  
+**Unofficial fan project. Not affiliated with or endorsed by Nintendo.**  
 Requires a legally-obtained copy of The Legend of Zelda: The Wind Waker HD (Wii U, USA or EUR).
 
 ---
 
 ## Features
 
-- **Real-time player sync** — world position, rotation, and animation state at 20 Hz with interpolated rendering
-- **Full enemy sync** — position, rotation, HP, every animation, and attack state replicated exactly across all clients
-- **All players are targets** — enemy targeting and hitboxes extended to every connected player; any player can damage and be damaged
-- **Shared world state** — chest flags, door states, switches, and enemy kills synchronized; area transitions gated to prevent divergence
-- **Mod SDK v2 native** — implemented as a guest mod using the official hook system (`daPy_Execute`, `fpcM_Execute`)
-- **ENet UDP transport** — position data unreliable at 20 Hz; critical state changes (HP, deaths) sent reliably
+- **P2P multiplayer** — direct peer-to-peer connections via UDP hole punching; no dedicated server required
+- **Relay support** — optional relay server for players behind strict NAT
+- **In-game overlay** — GDI bar shows room code and status at all times
+- **F1 Mods integration** — select Host or Join mode directly from the game's built-in Mods menu
+- **F8 clipboard copy** — instantly copy your lobby code to share with friends
+- **F9 info panel** — toggle a detailed overlay showing room code, mode, and peer count
+- **Real-time position sync** — player position and rotation replicated at 20 Hz
+
+---
+
+## Quick start
+
+### 1 — Install the mod
+
+1. Download or build `wwhd_online.dll` and `manifest.json`
+2. Place both files in your Mod Manager mods folder:
+   ```
+   data\user\ModManager\Mods\wwhd-online\
+   ```
+3. Launch the game, press **F1**, go to the **Mods** tab, and enable **WWHD Online**
+
+### 2 — Host a session
+
+1. In F1 → Mods → WWHD Online, set **Mode** to `host`
+2. Click **Apply** — the mod creates a P2P lobby and shows your room code in the top-center bar
+3. Press **F8** to copy the room code to your clipboard, then share it with your friend
+
+### 3 — Join a session
+
+1. Set **Mode** to `join` in the F1 → Mods UI
+2. Edit `wwhd_online.ini` (in the same folder as the DLL) to add:
+   ```ini
+   code=XXXXXX
+   ```
+3. Click **Apply** — the mod connects to the host's lobby
+
+> **Tip:** You can also configure everything via `wwhd_online.ini` without touching the F1 menu. See [Configuration](#configuration).
+
+---
+
+## Overlay controls
+
+| Key | Action |
+|-----|--------|
+| **F8** | Copy lobby code to clipboard (flashes confirmation for 2 seconds) |
+| **F9** | Toggle the info panel (room code, mode, peer count) |
+
+---
+
+## Configuration
+
+Create `wwhd_online.ini` next to `wwhd_online.dll`. F1 Mods settings override the ini file.
+
+```ini
+# Mode: host, join, relay-host, relay-join, direct-host, direct-join
+mode=host
+
+# P2P signaling server (default: Cloudflare Worker)
+signal_url=https://wwhd-signal.wwhdmm.workers.dev
+
+# Join: 6-character room code
+code=XXXXXX
+
+# Relay / direct: server address and port
+addr=127.0.0.1
+port=7777
+```
 
 ---
 
 ## Architecture
 
-Two layers: a guest mod (PowerPC C) reads and writes game state; a native host layer (C++) handles network transport.
-
 ```
-┌─────────────────────────────────────────────────────────┐
-│                 Game Instance (each player)              │
-├─────────────────────────────────────────────────────────┤
-│  GUEST LAYER  (PowerPC C mod, Mod SDK v2)                │
-│  daPy_Execute hook  ─► read Link pos/rot/anim each step  │
-│  fpcM_Execute hook  ─► iterate actors, read enemy state  │
-│  wwhd_net_send/recv ─► bridge to host network layer      │
-├─────────────────────────────────────────────────────────┤
-│  HOST LAYER   (C++, runtime/src/net/)                    │
-│  ENet UDP socket    ─► reliable + unreliable channels    │
-│  Delta encoder      ─► skip position if change < 1 unit  │
-│  Session manager    ─► host/client roles, player registry│
-└─────────────────────────────────────────────────────────┘
-                            │  UDP
-            ┌───────────────┼──────────────┐
-       Instance A       Instance B     Instance C
-```
+┌─────────────────────────────────────────────────────────────┐
+│                   Game Process (each player)                 │
+├─────────────────────────────────────────────────────────────┤
+│  WWHD Online native mod  (wwhd_online.dll)                   │
+│                                                              │
+│  wwhd_mod_init_v1  ── reads config (F1 > ini > cmdline)      │
+│  on_frame          ── reads Link pos/rot/anim, sends packets │
+│  on_config_changed ── live reconnect when F1 Mods changes    │
+│  on_unload         ── clean shutdown (overlay + network)     │
+│                                                              │
+│  GDI overlay thread ── top bar + F9 panel + F8/F9 hotkeys    │
+│  ENet transport     ── reliable + unreliable UDP channels    │
+└─────────────────────────────────────────────────────────────┘
+                              │  UDP
+              ┌───────────────┼───────────────┐
+         Player A         Player B        Player C
 
-### Enemy sync (Phase 4)
-
-The host owns enemy AI and broadcasts full state each tick. Clients receive position/rotation/HP/animation deltas and write them into actor memory. Enemy targeting is extended by hooking the perception-radius check and injecting all remote player positions alongside Link's.
-
-```c
-/* Per-enemy packet, 20 bytes, sent at 20 Hz unreliable / HP changes reliable */
-typedef struct {
-    u32  actor_id;    /* fopAc_ac_c process handle            */
-    s16  x, y, z;    /* position * 4, range ±8192 m          */
-    u16  yaw;         /* y-rotation                           */
-    u8   hp;          /* current health                       */
-    u8   phase;       /* WWHD_COMBAT_ALIVE / FLINCH / DEAD    */
-    u8   anim_id;     /* index into enemy's animation table   */
-    u8   attack_flag; /* attack_active_frames != 0            */
-    u8   flags;
-    u8   pad[3];
-} EnemyPacket; /* sizeof == 20 */
+P2P mode:  Cloudflare Worker signaling → STUN → UDP hole punch
+Relay mode: wwhd-relay server (see relay/)
 ```
 
 ---
 
-## Build setup (Windows)
+## Building (Windows)
 
-### 1 — Prerequisites
-
-Clang is required. MSVC cannot build the recompiled game code due to `musttail`.  
-Also install the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) from LunarG.
+Requires **Visual Studio 2022** (MSVC + Windows SDK).
 
 ```powershell
-winget install LLVM.LLVM
-winget install Kitware.CMake
-winget install Ninja-build.Ninja
-pip install pycryptodome
+.\build_native_mod.ps1
 ```
 
-### 2 — Clone with submodules
+Output: `wwhd_online.dll` in the project root. Copy it and `manifest.json` to your mod folder.
 
-```powershell
-git clone --recurse-submodules https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp.git
-cd ZeldaWWHDRecomp
+The build script links against: `enet`, `ws2_32`, `winmm`, `advapi32`, `crypt32`, `winhttp`, `user32`, `gdi32`.
+
+---
+
+## Signaling server
+
+The default signaling server is a Cloudflare Worker in `signaling/`. It brokers the initial STUN exchange so peers can punch through NAT — no traffic is relayed through it after the connection is established.
+
+To self-host:
+```bash
+cd signaling
+npm install
+npx wrangler deploy
 ```
 
-### 3 — Extract and recompile
-
-Provide your own `.wux` or `.wud` Wii U disc image. This runs once (~2 minutes).
-
-```powershell
-python tools/wudextract.py game.wux extract game
-python tools/recomp/recomp.py game/code/cking.rpx build/gen
-```
-
-### 4 — Build the runtime
-
-```powershell
-cmake -S . -B build/win -G Ninja `
-  -DCMAKE_BUILD_TYPE=Release `
-  -DCMAKE_C_COMPILER=clang `
-  -DCMAKE_CXX_COMPILER=clang++
-cmake --build build/win
-.\build\win\wwhd.exe
-```
-
-### 5 — Build and install the mod
-
-Requires Clang with a PowerPC cross-compilation target and `ld.lld`.
-
-```powershell
-cd examples/guest-mods
-make CLANG=clang LLD=ld.lld
-# In-game: Mods → Installed packages → Choose folder → enable → restart
-```
+Update `signal_url` in your `wwhd_online.ini` to point to your worker.
 
 ---
 
 ## Project status
 
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 1 | Link state reader (position hook) | ✅ Done |
-| 2 | Host-side ENet transport layer | 🔨 In progress |
-| 3 | Remote player rendering (phantom actor) | 📋 Planned |
-| 4 | Full enemy sync + player targeting | 📋 Planned |
-| 5 | World state sync (flags, items) | 📋 Planned |
+| Component | Status |
+|-----------|--------|
+| Native mod ABI v1 integration | ✅ Done |
+| P2P networking (ENet + hole punching) | ✅ Done |
+| Relay networking | ✅ Done |
+| F1 Mods UI integration | ✅ Done |
+| GDI overlay + F8/F9 hotkeys | ✅ Done |
+| Player position/rotation sync | ✅ Done |
+| Remote player rendering | 📋 Planned |
+| Enemy sync | 📋 Planned |
+| World state sync (flags, chests) | 📋 Planned |
 
 ---
 
 ## Credits
 
-This project stands entirely on the work of the following teams and contributors:
-
 | Project | Role |
 |---------|------|
-| [ZeldaWWHDRecomp](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp) | Native PC port — the entire foundation |
-| [ZeldaWWHDDecomp](https://github.com/ZeldaWWHDDecomp/wwhd) | Game decompilation — all actor struct knowledge |
-| [ZeldaWWHDMods](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods) | Mod SDK v2 and examples (sdk-v3-enemy directly informed the enemy sync design) |
-| [Cemu Project](https://cemu.info) | Latte shader decompiler vendored in the WWHD runtime |
+| [ZeldaWWHDRecomp](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp) | Native PC port and mod ABI |
+| [ZeldaWWHDDecomp](https://github.com/ZeldaWWHDDecomp/wwhd) | Game decompilation — actor struct offsets |
 | [ENet](http://enet.bespin.org) | Reliable UDP networking library |
 | Nintendo | Original game (*The Legend of Zelda: The Wind Waker HD*, 2013) |
 
