@@ -100,7 +100,7 @@ Write-Host "Linking wwhd_online.dll..."
 $outDll = "$ScriptDir\wwhd_online.dll"
 $outLib = "$ScriptDir\wwhd_online.lib"
 $objList = $objs -join " "
-$linkArgs = "/nologo /DLL /OUT:`"$outDll`" /IMPLIB:`"$outLib`" $objList `"$EnetLib`" ws2_32.lib winmm.lib advapi32.lib crypt32.lib winhttp.lib"
+$linkArgs = "/nologo /DLL /OUT:`"$outDll`" /IMPLIB:`"$outLib`" $objList `"$EnetLib`" ws2_32.lib winmm.lib advapi32.lib crypt32.lib winhttp.lib user32.lib gdi32.lib"
 cmd /c "$link $linkArgs"
 if ($LASTEXITCODE -ne 0) { Write-Error "Link failed"; exit 1 }
 

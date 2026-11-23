@@ -11,5 +11,13 @@
   },
   "author": "wwhd-online contributors",
   "description": "True online multiplayer for The Legend of Zelda: The Wind Waker HD",
-  "minimum_manager_version": "1.5.0"
+  "options": [
+    {
+      "id": "mode",
+      "name": "Mode",
+      "type": "enum",
+      "default": "host",
+      "choices": ["host", "join"]
+    }
+  ]
 }

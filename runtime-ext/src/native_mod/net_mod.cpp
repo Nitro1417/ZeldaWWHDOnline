@@ -35,6 +35,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdarg>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,22 @@ static constexpr uint32_t kActorCurrentYawOff   = 0x320;  /* u16 angle.y        
 
 /* PPC func address of wwhd_dComIfG_getGameInfo (confirmed in bindings.h). */
 static constexpr uint32_t kGetGameInfoAddr = 0x025200D4;
+
+/* ── File log (visible even in GUI processes) ─────────────────────────────── */
+static FILE* g_log = nullptr;
+
+static void log_open() {
+    char path[MAX_PATH];
+    GetTempPathA(MAX_PATH, path);
+    strncat(path, "wwhd_online.log", MAX_PATH - strlen(path) - 1);
+    g_log = fopen(path, "a");
+    if (g_log) { fprintf(g_log, "--- wwhd_mod_init_v1 ---\n"); fflush(g_log); }
+}
+static void logf(const char* fmt, ...) {
+    if (!g_log) return;
+    va_list ap; va_start(ap, fmt); vfprintf(g_log, fmt, ap); va_end(ap);
+    fputc('\n', g_log); fflush(g_log);
+}
 
 /* ── Module state ─────────────────────────────────────────────────────────── */
 
@@ -150,6 +167,9 @@ static bool pos_valid(float x, float y, float z) {
         && (z >= -16000.f) && (z <= 16000.f);
 }
 
+/* ── DLL path (set by DllMain) ───────────────────────────────────────────── */
+static HMODULE g_hmod = nullptr;
+
 /* ── Command-line parser ─────────────────────────────────────────────────── */
 
 struct OnlineArgs {
@@ -213,6 +233,351 @@ static OnlineArgs parse_online_args() {
     return a;
 }
 
+/* ── Config file parser ──────────────────────────────────────────────────── */
+/* Returns directory containing the DLL, with trailing backslash. */
+static std::string dll_dir() {
+    char buf[MAX_PATH] = {};
+    GetModuleFileNameA(g_hmod, buf, MAX_PATH);
+    std::string s(buf);
+    auto pos = s.find_last_of("\\/");
+    return (pos != std::string::npos) ? s.substr(0, pos + 1) : "";
+}
+
+/* Reads wwhd_online.ini from the same folder as the DLL. */
+static OnlineArgs parse_config_file() {
+    OnlineArgs a;
+    std::string path = dll_dir() + "wwhd_online.ini";
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) { logf("no config file at %s", path.c_str()); return a; }
+
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        for (char* p = line; *p; p++) if (*p == '\r' || *p == '\n') { *p = '\0'; break; }
+        if (!line[0] || line[0] == '#' || line[0] == ';') continue;
+        char* eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        const char* key = line;
+        const char* val = eq + 1;
+        while (*val == ' ') val++;
+
+        if (strcmp(key, "mode") == 0) {
+            if (strcmp(val, "host") == 0 || strcmp(val, "p2p-host") == 0)
+                a.mode = OnlineArgs::Mode::P2PCreate;
+            else if (strcmp(val, "join") == 0 || strcmp(val, "p2p-join") == 0)
+                a.mode = OnlineArgs::Mode::P2PJoin;
+            else if (strcmp(val, "direct-host") == 0)  a.mode = OnlineArgs::Mode::Host;
+            else if (strcmp(val, "direct-join") == 0)  a.mode = OnlineArgs::Mode::Join;
+            else if (strcmp(val, "relay-host") == 0)   a.mode = OnlineArgs::Mode::RelayCreate;
+            else if (strcmp(val, "relay-join") == 0)   a.mode = OnlineArgs::Mode::RelayJoin;
+        } else if (strcmp(key, "signal_url") == 0) {
+            strncpy(a.signal_url, val, 511); a.signal_url[511] = 0;
+        } else if (strcmp(key, "addr") == 0) {
+            strncpy(a.addr, val, 255); a.addr[255] = 0;
+        } else if (strcmp(key, "port") == 0) {
+            a.port = (uint16_t)atoi(val);
+        } else if (strcmp(key, "code") == 0) {
+            strncpy(a.code, val, 7); a.code[7] = 0;
+        }
+    }
+    fclose(f);
+    logf("config: mode=%d signal_url=%s code=%s", (int)a.mode, a.signal_url, a.code);
+    return a;
+}
+
+/* ── Merged config: manifest options (F1 Mods) > ini > cmdline ─────────── */
+static OnlineArgs build_config() {
+    OnlineArgs a = parse_config_file();
+    if (a.mode == OnlineArgs::Mode::None) a = parse_online_args();
+
+    const WWHDModHostV1* h = g_mod.host;
+    if (!h) return a;
+    const char* m = h->get_string(h->context, "mode");
+    const char* s = h->get_string(h->context, "signal_url");
+
+    if (m && m[0]) {
+        if      (strcmp(m, "host")       == 0) a.mode = OnlineArgs::Mode::P2PCreate;
+        else if (strcmp(m, "join")       == 0) a.mode = OnlineArgs::Mode::P2PJoin;
+        else if (strcmp(m, "relay-host") == 0) a.mode = OnlineArgs::Mode::RelayCreate;
+        else if (strcmp(m, "relay-join") == 0) a.mode = OnlineArgs::Mode::RelayJoin;
+        else if (strcmp(m, "disabled")   == 0) a.mode = OnlineArgs::Mode::None;
+    }
+    if (s && s[0]) { strncpy(a.signal_url, s, 511); a.signal_url[511] = 0; }
+    return a;
+}
+
+/* ── On-screen overlay (GDI layered windows) ────────────────────────────── */
+/* Bar:   460×36 strip at top-center — always visible when lobby is active.  */
+/* Panel: 352×215 info card at top-right — press F9 to toggle.              */
+
+static volatile HWND  g_bar_hwnd     = nullptr;
+static volatile HWND  g_panel_hwnd   = nullptr;
+static volatile bool  g_panel_vis    = false;
+static HANDLE         g_overlay_thrd = nullptr;
+static DWORD          g_overlay_tid  = 0;
+static char          g_bar_text[128]     = {};
+static char          g_panel_line[5][80] = {};
+static UINT          g_wm_update         = 0;
+static const int     HOTKEY_ID_PANEL     = 1;
+static const int     HOTKEY_ID_COPY      = 2;
+static const UINT_PTR TIMER_ID_FLASH     = 1;
+static char          g_bar_saved[128]    = {};
+
+/* Bar: single-line status strip ─────────────────────────────────────────── */
+static LRESULT CALLBACK BarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    (void)lp;
+    if (g_wm_update && msg == g_wm_update) {
+        InvalidateRect(hwnd, nullptr, TRUE);
+        if (g_panel_hwnd && g_panel_vis)
+            InvalidateRect((HWND)g_panel_hwnd, nullptr, TRUE);
+        return 0;
+    }
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc; GetClientRect(hwnd, &rc);
+        HBRUSH bg = CreateSolidBrush(RGB(8, 10, 22));
+        FillRect(hdc, &rc, bg); DeleteObject(bg);
+        SetTextColor(hdc, RGB(255, 220, 50));
+        SetBkMode(hdc, TRANSPARENT);
+        HFONT font = CreateFontA(18, 0, 0, 0, FW_BOLD, 0, 0, 0,
+                                 ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Consolas");
+        HFONT old = (HFONT)SelectObject(hdc, font);
+        char buf[128]; memcpy(buf, g_bar_text, 128);
+        DrawTextA(hdc, buf, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, old); DeleteObject(font);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == TIMER_ID_FLASH) {
+        KillTimer(hwnd, TIMER_ID_FLASH);
+        memcpy(g_bar_text, g_bar_saved, 128);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+    }
+    if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+/* Panel: multi-line info card ───────────────────────────────────────────── */
+static LRESULT CALLBACK PanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    (void)wp; (void)lp;
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc; GetClientRect(hwnd, &rc);
+
+        HBRUSH bg = CreateSolidBrush(RGB(10, 12, 28));
+        FillRect(hdc, &rc, bg); DeleteObject(bg);
+
+        /* Cyan left accent stripe */
+        HBRUSH stripe = CreateSolidBrush(RGB(0, 190, 225));
+        RECT sl = {0, 0, 4, rc.bottom};
+        FillRect(hdc, &sl, stripe); DeleteObject(stripe);
+
+        SetBkMode(hdc, TRANSPARENT);
+
+        HFONT ftitle = CreateFontA(20, 0, 0, 0, FW_BOLD, 0, 0, 0,
+                                   ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                   DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+        HFONT fbody  = CreateFontA(15, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                                   ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                   DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Consolas");
+
+        /* Title */
+        SelectObject(hdc, ftitle);
+        SetTextColor(hdc, RGB(0, 210, 255));
+        RECT tr = {12, 10, rc.right - 6, 34};
+        DrawTextA(hdc, "WWHD ONLINE", -1, &tr, DT_LEFT | DT_TOP);
+
+        /* Separator line */
+        HPEN hpen = CreatePen(PS_SOLID, 1, RGB(0, 90, 120));
+        HPEN hpen_old = (HPEN)SelectObject(hdc, hpen);
+        MoveToEx(hdc, 12, 36, nullptr); LineTo(hdc, rc.right - 8, 36);
+        SelectObject(hdc, hpen_old); DeleteObject(hpen);
+
+        /* Content lines */
+        SelectObject(hdc, fbody);
+        int y = 44;
+        for (int i = 0; i < 5; i++) {
+            char buf[80]; memcpy(buf, g_panel_line[i], 80);
+            if (!buf[0]) { y += 22; continue; }
+            /* Line 1 (room code) is bright yellow; others are light grey */
+            SetTextColor(hdc, (i == 1) ? RGB(255, 230, 50) : RGB(190, 205, 225));
+            RECT lr = {12, y, rc.right - 8, y + 20};
+            DrawTextA(hdc, buf, -1, &lr, DT_LEFT | DT_TOP);
+            y += 22;
+        }
+
+        /* Footer hint */
+        SetTextColor(hdc, RGB(70, 85, 120));
+        RECT fr = {12, rc.bottom - 20, rc.right - 8, rc.bottom - 4};
+        DrawTextA(hdc, "[F8] copy code  [F9] close", -1, &fr, DT_LEFT | DT_TOP);
+
+        DeleteObject(ftitle); DeleteObject(fbody);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    if (msg == WM_DESTROY) { return 0; }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static DWORD WINAPI overlay_thread_fn(LPVOID) {
+    g_wm_update = RegisterWindowMessageA("WWHD_ONLINE_OVERLAY_UPDATE");
+
+    WNDCLASSEXA wc = {};
+    wc.cbSize = sizeof(wc); wc.hInstance = g_hmod;
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+
+    wc.lpfnWndProc = BarWndProc; wc.lpszClassName = "WWHDOnlineBar";
+    RegisterClassExA(&wc);
+    wc.lpfnWndProc = PanelWndProc; wc.lpszClassName = "WWHDOnlinePanel";
+    RegisterClassExA(&wc);
+
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+
+    /* Bar window */
+    HWND bar = CreateWindowExA(
+        WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+        "WWHDOnlineBar", "", WS_POPUP,
+        (sw - 460) / 2, 8, 460, 36,
+        nullptr, nullptr, g_hmod, nullptr);
+    if (!bar) return 1;
+    SetLayeredWindowAttributes(bar, 0, 215, LWA_ALPHA);
+    ShowWindow(bar, SW_SHOWNOACTIVATE); UpdateWindow(bar);
+    g_bar_hwnd = bar;
+
+    /* Panel window (initially hidden) */
+    HWND panel = CreateWindowExA(
+        WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+        "WWHDOnlinePanel", "", WS_POPUP,
+        sw - 360, 55, 352, 215,
+        nullptr, nullptr, g_hmod, nullptr);
+    if (panel) {
+        SetLayeredWindowAttributes(panel, 0, 235, LWA_ALPHA);
+        g_panel_hwnd = panel;
+    }
+
+    /* F9 hotkey for panel toggle — received as thread message (hwnd=NULL) */
+    RegisterHotKey(nullptr, HOTKEY_ID_PANEL, 0, VK_F9);
+    RegisterHotKey(nullptr, HOTKEY_ID_COPY,  0, VK_F8);
+
+    MSG m;
+    while (GetMessageA(&m, nullptr, 0, 0) > 0) {
+        if (m.message == WM_HOTKEY && (int)m.wParam == HOTKEY_ID_PANEL) {
+            g_panel_vis = !g_panel_vis;
+            if (g_panel_hwnd)
+                ShowWindow((HWND)g_panel_hwnd,
+                           g_panel_vis ? SW_SHOWNOACTIVATE : SW_HIDE);
+            continue;
+        }
+        if (m.message == WM_HOTKEY && (int)m.wParam == HOTKEY_ID_COPY) {
+            const char* code = net::lobby_code();
+            if (code && code[0]) {
+                size_t len = strlen(code) + 1;
+                HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, len);
+                if (hg) {
+                    memcpy(GlobalLock(hg), code, len);
+                    GlobalUnlock(hg);
+                    if (OpenClipboard(nullptr)) {
+                        EmptyClipboard();
+                        SetClipboardData(CF_TEXT, hg);
+                        CloseClipboard();
+                    } else {
+                        GlobalFree(hg);
+                    }
+                }
+                memcpy(g_bar_saved, g_bar_text, 128);
+                snprintf(g_bar_text, 128, "Copied!  %s  — paste to share  [F9]", code);
+                InvalidateRect((HWND)g_bar_hwnd, nullptr, TRUE);
+                SetTimer((HWND)g_bar_hwnd, TIMER_ID_FLASH, 2000, nullptr);
+            }
+            continue;
+        }
+        TranslateMessage(&m); DispatchMessageA(&m);
+    }
+    UnregisterHotKey(nullptr, HOTKEY_ID_PANEL);
+    UnregisterHotKey(nullptr, HOTKEY_ID_COPY);
+    g_bar_hwnd = nullptr; g_panel_hwnd = nullptr;
+    return 0;
+}
+
+static void overlay_show(const char* bar,
+                         const char* l0 = nullptr, const char* l1 = nullptr,
+                         const char* l2 = nullptr, const char* l3 = nullptr,
+                         const char* l4 = nullptr) {
+    auto cp = [](char* dst, size_t n, const char* src) {
+        if (src) { strncpy(dst, src, n - 1); dst[n - 1] = '\0'; }
+    };
+    cp(g_bar_text,       128, bar);
+    cp(g_panel_line[0],  80,  l0);
+    cp(g_panel_line[1],  80,  l1);
+    cp(g_panel_line[2],  80,  l2);
+    cp(g_panel_line[3],  80,  l3);
+    cp(g_panel_line[4],  80,  l4);
+
+    if (!g_bar_hwnd) {
+        g_overlay_thrd = CreateThread(nullptr, 0, overlay_thread_fn, nullptr, 0, &g_overlay_tid);
+    } else if (g_wm_update)
+        PostMessageA((HWND)g_bar_hwnd, g_wm_update, 0, 0);
+}
+
+/* ── Start network from resolved args ───────────────────────────────────── */
+static void do_net_start(const OnlineArgs& a) {
+    const WWHDModHostV1* h = g_mod.host;
+    bool ok = false;
+    switch (a.mode) {
+    case OnlineArgs::Mode::Host:
+        ok = net::host_start(a.port);
+        logf("host_start(%u) -> %d", a.port, ok);
+        if (ok) h->log(h->context, "WWHD Online: hosting direct session");
+        break;
+    case OnlineArgs::Mode::Join:
+        ok = net::client_connect(a.addr, a.port);
+        logf("client_connect -> %d", ok);
+        if (ok) h->log(h->context, "WWHD Online: connected (direct)");
+        break;
+    case OnlineArgs::Mode::P2PCreate:
+        ok = net::p2p_create(a.signal_url);
+        logf("p2p_create -> %d  lobby_code='%s'", ok, net::lobby_code() ? net::lobby_code() : "(null)");
+        if (ok) {
+            h->log(h->context, "WWHD Online: P2P lobby created");
+            const char* code = net::lobby_code();
+            if (code && code[0]) {
+                char bar[128], l1[80];
+                snprintf(bar, sizeof bar, "WWHD Online  room: %s  (waiting...)  [F9]", code);
+                snprintf(l1, 80, "Room code:  %s", code);
+                overlay_show(bar, "Mode:    Hosting (P2P)", l1,
+                             "Status:  Waiting for players...",
+                             "", "Share code with friends");
+            }
+        }
+        break;
+    case OnlineArgs::Mode::P2PJoin:
+        ok = net::p2p_join(a.signal_url, a.code);
+        logf("p2p_join -> %d", ok);
+        if (ok) h->log(h->context, "WWHD Online: P2P connected");
+        break;
+    case OnlineArgs::Mode::RelayCreate:
+        ok = net::relay_create(a.addr, a.port);
+        logf("relay_create -> %d", ok);
+        if (ok) h->log(h->context, "WWHD Online: relay lobby created");
+        break;
+    case OnlineArgs::Mode::RelayJoin:
+        ok = net::relay_join(a.addr, a.port, a.code);
+        logf("relay_join -> %d", ok);
+        if (ok) h->log(h->context, "WWHD Online: relay connected");
+        break;
+    case OnlineArgs::Mode::None:
+        h->log(h->context, "WWHD Online: mod loaded (inactive — set mode in F1 → Mods)");
+        logf("mode=disabled");
+        break;
+    }
+    if (a.mode != OnlineArgs::Mode::None && !ok)
+        logf("connection FAILED for mode %d", (int)a.mode);
+}
+
 /* ── Frame callbacks ─────────────────────────────────────────────────────── */
 
 static void on_frame(void* /*instance*/, uint64_t logic_step) {
@@ -222,15 +587,29 @@ static void on_frame(void* /*instance*/, uint64_t logic_step) {
 
     const WWHDModHostV1* h = g_mod.host;
 
-    /* Display lobby code once per second (every 60 logic steps). */
-    if ((net::is_relay() || net::is_p2p()) && net::is_host() && net::is_connected()) {
-        if (logic_step % 60 == 0) {
-            const char* code = net::lobby_code();
-            if (code && code[0]) {
+    /* Update bar + panel once per second. */
+    if ((net::is_relay() || net::is_p2p()) && net::is_host() && logic_step % 60 == 0) {
+        const char* code = net::lobby_code();
+        if (code && code[0]) {
+            uint8_t peers = net::peer_count();
+            char peer_str[48];
+            if (peers > 0)
+                snprintf(peer_str, sizeof peer_str, "Players: %u connected", (unsigned)peers);
+            else
+                strncpy(peer_str, "Status:  Waiting for players...", 48);
+            if (peers > 0)
                 snprintf(g_mod.status_buf, sizeof g_mod.status_buf,
-                         "WWHD Online — room: %s", code);
-                h->status(h->context, g_mod.status_buf);
-            }
+                         "WWHD Online  room: %s  (%u peer%s)  [F9]",
+                         code, (unsigned)peers, peers == 1 ? "" : "s");
+            else
+                snprintf(g_mod.status_buf, sizeof g_mod.status_buf,
+                         "WWHD Online  room: %s  (waiting...)  [F9]", code);
+            char l1[80];
+            snprintf(l1, 80, "Room code:  %s", code);
+            overlay_show(g_mod.status_buf,
+                         "Mode:    Hosting (P2P)", l1, peer_str,
+                         "", "Share code with friends");
+            h->status(h->context, g_mod.status_buf);
         }
     }
 
@@ -257,20 +636,49 @@ static void on_frame(void* /*instance*/, uint64_t logic_step) {
         net::send_unreliable(net::NET_HOST_ID,   net::Channel::Player, &pkt, sizeof pkt);
 }
 
-static void on_config_changed(void* /*instance*/) {}
+static void on_config_changed(void* /*instance*/) {
+    net::shutdown();
+    OnlineArgs a = build_config();
+    logf("on_config_changed: mode=%d signal=%s", (int)a.mode, a.signal_url);
+    do_net_start(a);
+}
+
+static void overlay_stop() {
+    if (g_overlay_tid) {
+        PostThreadMessageA(g_overlay_tid, WM_QUIT, 0, 0);
+        if (g_overlay_thrd) {
+            WaitForSingleObject(g_overlay_thrd, 2000);
+            CloseHandle(g_overlay_thrd);
+            g_overlay_thrd = nullptr;
+        }
+        g_overlay_tid = 0;
+    }
+}
 
 static void on_unload(void* /*instance*/) {
     net::shutdown();
+    overlay_stop();
+}
+
+/* ── DllMain — capture our HMODULE ──────────────────────────────────────── */
+BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) g_hmod = hInst;
+    return TRUE;
 }
 
 /* ── Entry point ─────────────────────────────────────────────────────────── */
 
 WWHD_MOD_EXPORT int wwhd_mod_init_v1(const WWHDModHostV1* host, WWHDModV1* mod) {
-    if (!host || !mod) return 0;
-    if (host->abi_version < WWHD_MOD_ABI_VERSION) return 0;
+    log_open();
+    if (!host || !mod) { logf("ERROR: null host/mod"); return 0; }
+    if (host->abi_version < WWHD_MOD_ABI_VERSION) {
+        logf("ERROR: ABI mismatch (host=%u need=%u)", host->abi_version, WWHD_MOD_ABI_VERSION);
+        return 0;
+    }
 
     g_mod.host          = host;
     g_mod.gameinfo_base = decode_gameinfo_base(host);
+    logf("gameinfo_base: 0x%08X", g_mod.gameinfo_base);
 
     if (g_mod.gameinfo_base)
         host->log(host->context, "WWHD Online: gameInfo decoded OK");
@@ -279,44 +687,11 @@ WWHD_MOD_EXPORT int wwhd_mod_init_v1(const WWHDModHostV1* host, WWHDModV1* mod) 
                   "WWHD Online: WARNING — could not decode gameInfo base; "
                   "position sync disabled until addressed.");
 
-    /* Parse --online-* from the game process command line. */
-    OnlineArgs a = parse_online_args();
-    bool ok = false;
-
-    switch (a.mode) {
-    case OnlineArgs::Mode::Host:
-        ok = net::host_start(a.port);
-        if (ok) host->log(host->context, "WWHD Online: hosting direct session");
-        break;
-    case OnlineArgs::Mode::Join:
-        ok = net::client_connect(a.addr, a.port);
-        if (ok) host->log(host->context, "WWHD Online: connected (direct)");
-        break;
-    case OnlineArgs::Mode::P2PCreate:
-        ok = net::p2p_create(a.signal_url);
-        if (ok) host->log(host->context, "WWHD Online: P2P lobby created");
-        break;
-    case OnlineArgs::Mode::P2PJoin:
-        ok = net::p2p_join(a.signal_url, a.code);
-        if (ok) host->log(host->context, "WWHD Online: P2P connected");
-        break;
-    case OnlineArgs::Mode::RelayCreate:
-        ok = net::relay_create(a.addr, a.port);
-        if (ok) host->log(host->context, "WWHD Online: relay lobby created");
-        break;
-    case OnlineArgs::Mode::RelayJoin:
-        ok = net::relay_join(a.addr, a.port, a.code);
-        if (ok) host->log(host->context, "WWHD Online: relay connected");
-        break;
-    case OnlineArgs::Mode::None:
-        host->log(host->context, "WWHD Online: no --online-* args; mod loaded but inactive");
-        ok = false;
-        break;
-    }
-
-    if (a.mode != OnlineArgs::Mode::None && !ok) {
-        host->log(host->context, "WWHD Online: connection failed; mod inactive");
-    }
+    /* Resolve config: manifest options > ini > cmdline, then start network. */
+    OnlineArgs a = build_config();
+    logf("final mode: %d  signal_url: %s  addr: %s  port: %u  code: %s",
+         (int)a.mode, a.signal_url, a.addr, a.port, a.code);
+    do_net_start(a);
 
     /* Fill the mod descriptor. */
     mod->size             = sizeof(WWHDModV1);
