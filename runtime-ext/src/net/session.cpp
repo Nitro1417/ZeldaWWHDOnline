@@ -11,6 +11,21 @@ namespace session {
 
 static Player s_players[MAX_PLAYERS] = {};
 
+/* ── Chat ring buffer ── */
+static constexpr int CHAT_MAX = 8;
+static ChatEntry s_chat[CHAT_MAX] = {};
+static int s_chat_head  = 0;
+static int s_chat_count = 0;
+
+static void push_chat(uint8_t player_id, const char* sender, const char* text) {
+    ChatEntry& e = s_chat[s_chat_head];
+    e.player_id = player_id;
+    strncpy(e.name, sender, 15); e.name[15] = '\0';
+    strncpy(e.text, text,   63); e.text[63] = '\0';
+    s_chat_head = (s_chat_head + 1) % CHAT_MAX;
+    if (s_chat_count < CHAT_MAX) ++s_chat_count;
+}
+
 /* ── Internal helpers ── */
 
 static void clear_player(uint8_t id) {
@@ -112,6 +127,20 @@ static void handle_packet(uint8_t peer_id, net::Channel ch,
         /* TODO: gate area transitions so all players load together. */
         break;
 
+    case MSG_PLAYER_INFO:
+        if (len < sizeof(PlayerInfoPacket)) break;
+        on_player_info_packet(peer_id, (const PlayerInfoPacket*)data);
+        if (net::is_host())
+            net::send_reliable(net::NET_BROADCAST, net::Channel::State, data, len);
+        break;
+
+    case MSG_CHAT:
+        if (len < sizeof(ChatPacket)) break;
+        on_chat_packet(peer_id, (const ChatPacket*)data);
+        if (net::is_host())
+            net::send_reliable(net::NET_BROADCAST, net::Channel::State, data, len);
+        break;
+
     default:
         break;
     }
@@ -119,8 +148,39 @@ static void handle_packet(uint8_t peer_id, net::Channel ch,
 
 /* ── Public API ── */
 
+int chat_count() { return s_chat_count; }
+
+ChatEntry chat_get(int idx) {
+    /* 0 = most recent */
+    int slot = (s_chat_head - 1 - idx % CHAT_MAX + CHAT_MAX * 2) % CHAT_MAX;
+    return s_chat[slot];
+}
+
+void add_local_chat(const char* sender_name, const char* text) {
+    push_chat(net::local_player_id(), sender_name, text);
+}
+
+void on_player_info_packet(uint8_t /*peer_id*/, const PlayerInfoPacket* pkt) {
+    if (!pkt || pkt->player_id >= MAX_PLAYERS) return;
+    Player* p = &s_players[pkt->player_id];
+    p->life     = pkt->life;
+    p->max_life = pkt->max_life;
+    if (pkt->name[0]) {
+        strncpy(p->name, pkt->name, 15); p->name[15] = '\0';
+    }
+}
+
+void on_chat_packet(uint8_t /*peer_id*/, const ChatPacket* pkt) {
+    if (!pkt || pkt->player_id >= MAX_PLAYERS) return;
+    const Player* p = &s_players[pkt->player_id];
+    const char* name = (p->name[0]) ? p->name : "Player";
+    push_chat(pkt->player_id, name, pkt->text);
+}
+
 void init() {
     memset(s_players, 0, sizeof s_players);
+    s_chat_head  = 0;
+    s_chat_count = 0;
 
     /* Host is always player 0.
      * Relay joiners get their ID when RELAY_PLAYER_JOINED fires for them,

@@ -17,8 +17,10 @@ Requires a legally-obtained copy of The Legend of Zelda: The Wind Waker HD (Wii 
 - **Relay support** — optional relay server for players behind strict NAT
 - **In-game overlay** — GDI bar shows room code and status at all times
 - **F1 Mods integration** — select Host or Join mode directly from the game's built-in Mods menu
+- **F7 text chat** — press F7 to type a message; a toast appears bottom-center for 8 seconds on receipt
 - **F8 clipboard copy** — instantly copy your lobby code to share with friends
 - **F9 info panel** — toggle a detailed overlay showing room code, mode, and peer count
+- **Peer HUD** — top-left overlay shows each connected player's name and heart count in real time
 - **Real-time position sync** — player position and rotation replicated at 20 Hz
 
 ---
@@ -57,6 +59,7 @@ Requires a legally-obtained copy of The Legend of Zelda: The Wind Waker HD (Wii 
 
 | Key | Action |
 |-----|--------|
+| **F7** | Open chat input — type a message and press Enter or click Send |
 | **F8** | Copy lobby code to clipboard (flashes confirmation for 2 seconds) |
 | **F9** | Toggle the info panel (room code, mode, peer count) |
 
@@ -79,6 +82,9 @@ code=XXXXXX
 # Relay / direct: server address and port
 addr=127.0.0.1
 port=7777
+
+# Display name shown to other players in the HUD and chat (default: Link)
+name=YourName
 ```
 
 ---
@@ -146,8 +152,10 @@ Update `signal_url` in your `wwhd_online.ini` to point to your worker.
 | P2P networking (ENet + hole punching) | ✅ Done |
 | Relay networking | ✅ Done |
 | F1 Mods UI integration | ✅ Done |
-| GDI overlay + F8/F9 hotkeys | ✅ Done |
+| GDI overlay + F7/F8/F9 hotkeys | ✅ Done |
 | Player position/rotation sync | ✅ Done |
+| Peer HUD (name + heart count) | ✅ Done |
+| Text chat (F7) | ✅ Done |
 | Remote player rendering | 📋 Planned |
 | Enemy sync | 📋 Planned |
 | World state sync (flags, chests) | 📋 Planned |

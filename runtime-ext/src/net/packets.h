@@ -26,6 +26,8 @@
 #define MSG_AUTH_REQ        0x13  /* client → host: authenticate with session secret */
 #define MSG_AUTH_OK         0x14  /* host → client: secret accepted          */
 #define MSG_AUTH_FAIL       0x15  /* host → client: secret rejected; will disconnect */
+#define MSG_PLAYER_INFO     0x16  /* reliable CH_STATE ~1Hz: name + life stats       */
+#define MSG_CHAT            0x17  /* reliable CH_STATE: chat text, any → host → all  */
 #define MSG_DISCONNECT      0x1F
 
 #pragma pack(push, 1)
@@ -104,6 +106,22 @@ typedef struct {
     uint8_t  type;        /* MSG_AUTH_OK or MSG_AUTH_FAIL */
 } AuthResultPacket;       /* sizeof == 1 */
 
+/* 20 bytes — reliable CH_STATE at ~1Hz: player name + life */
+typedef struct {
+    uint8_t  type;        /* MSG_PLAYER_INFO */
+    uint8_t  player_id;
+    uint8_t  life;        /* current quarter-hearts (3 hearts = 12) */
+    uint8_t  max_life;    /* max quarter-hearts */
+    char     name[16];    /* null-terminated ASCII display name */
+} PlayerInfoPacket;       /* sizeof == 20 */
+
+/* 64 bytes — reliable CH_STATE: chat message */
+typedef struct {
+    uint8_t  type;        /* MSG_CHAT */
+    uint8_t  player_id;
+    char     text[62];    /* null-terminated UTF-8 message */
+} ChatPacket;             /* sizeof == 64 */
+
 #pragma pack(pop)
 
 /* ── Packet size validation ───────────────────────────────────────────────
@@ -121,6 +139,8 @@ inline bool packet_size_valid(uint8_t msg_type, uint32_t len) {
     case MSG_AUTH_REQ:     return len == sizeof(AuthReqPacket);
     case MSG_AUTH_OK:      return len == sizeof(AuthResultPacket);
     case MSG_AUTH_FAIL:    return len == sizeof(AuthResultPacket);
+    case MSG_PLAYER_INFO:  return len == sizeof(PlayerInfoPacket);
+    case MSG_CHAT:         return len == sizeof(ChatPacket);
     case MSG_DISCONNECT:   return len >= 1 && len <= 4;
     default:               return len >= 1 && len <= 512; /* unknown future types */
     }
